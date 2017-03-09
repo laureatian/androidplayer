@@ -1,7 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
 include $(CLEAR_VARS)
-include $(LOCAL_PATH)/../common.mk
+#include $(LOCAL_PATH)/../common.mk
 
 LOCAL_SRC_FILES := \
     androidplayer.cpp
@@ -14,11 +14,14 @@ LOCAL_C_INCLUDES:= \
 LOCAL_SHARED_LIBRARIES := \
         libutils \
         liblog \
-        libc++ \
-        libva \
-        libva-android \
         libgui \
         libhardware \
+        libva \
+        libva-android \
+
+#libva \
+#        libc++ \
+#        libva-android \
 
 LOCAL_MODULE := androidplayer
 include $(BUILD_EXECUTABLE)

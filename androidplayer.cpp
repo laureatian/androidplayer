@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-#include "vppinputoutput.h"
-#include "decodeinput.h"
-#include <Yami.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -27,16 +24,16 @@
 #include <gui/ISurfaceComposer.h>
 #include <ui/DisplayInfo.h>
 #include <android/native_window.h>
-#include <ufo/gralloc.h>
 #include <system/window.h>
 #include <ui/GraphicBufferMapper.h>
-#include <ufo/graphics.h>
+
 #include <va/va_android.h>
 #include <va/va.h>
+//#include <cros_gralloc_helpers.h>
+
 #include <map>
 #include <vector>
 
-using namespace YamiMediaCodec;
 
 #ifndef CHECK_EQ
 #define CHECK_EQ(a, b) do {                     \
@@ -46,26 +43,42 @@ using namespace YamiMediaCodec;
     } while (0)
 #endif
 
+#include <memory>
+#define SharedPtr std::shared_ptr
+
+using namespace android;
+
+struct VideoFrame {
+//    VASurfaceID surface;
+    ANativeWindowBuffer* buf;
+
+};
+
 #define ANDROID_DISPLAY 0x18C34078
+#define ERROR printf
+//#define HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL 'NV12'
+#define HAL_PIXEL_FORMAT_NV12  0x102
+
+enum {
+        GRALLOC_DRM_GET_STRIDE,
+        GRALLOC_DRM_GET_FORMAT,
+        GRALLOC_DRM_GET_DIMENSIONS,
+        GRALLOC_DRM_GET_BACKING_STORE,
+};
+
 
 class AndroidPlayer
 {
 public:
     bool init(int argc, char** argv)
     {
-        if (argc != 2) {
+        /*if (argc != 2) {
             printf("usage: androidplayer xxx.264\n");
             return false;
-        }
+        }*/
 
         if(!initWindow()) {
             fprintf(stderr, "failed to create android surface\n");
-            return false;
-        }
-
-        m_input.reset(DecodeInput::create(argv[1]));
-        if (!m_input) {
-            fprintf(stderr, "failed to open %s", argv[1]);
             return false;
         }
 
@@ -73,56 +86,12 @@ public:
             return false;
         }
 
-        if(!createVpp()) {
-            fprintf(stderr, "create vpp failed\n");
-            return false;
-        }
-
-        //init decoder
-        m_decoder.reset(createVideoDecoder(m_input->getMimeType()), releaseVideoDecoder);
-        if (!m_decoder) {
-            fprintf(stderr, "failed create decoder for %s", m_input->getMimeType());
-            return false;
-        }
-
-        //set native display
-        m_decoder->setNativeDisplay(m_nativeDisplay.get());
         return true;
     }
 
     bool run()
     {
-        VideoConfigBuffer configBuffer;
-        memset(&configBuffer, 0, sizeof(configBuffer));
-        configBuffer.profile = VAProfileNone;
-        const string codecData = m_input->getCodecData();
-        if (codecData.size()) {
-            configBuffer.data = (uint8_t*)codecData.data();
-            configBuffer.size = codecData.size();
-        }
-
-        Decode_Status status = m_decoder->start(&configBuffer);
-        assert(status == DECODE_SUCCESS);
-
-        VideoDecodeBuffer inputBuffer;
-        while (m_input->getNextDecodeUnit(inputBuffer)) {
-            status = m_decoder->decode(&inputBuffer);
-            if (DECODE_FORMAT_CHANGE == status) {
-                //drain old buffers
-                renderOutputs();
-                const VideoFormatInfo *formatInfo = m_decoder->getFormatInfo();
-                //resend the buffer
-                status = m_decoder->decode(&inputBuffer);
-            }
-            if(status == DECODE_SUCCESS) {
-                renderOutputs();
-            } else {
-                fprintf(stderr, "decode error %d\n", status);
-                break;
-            }
-        }
-        //renderOutputs();
-        m_decoder->stop();
+        renderOutputs();
         return true;
     }
 
@@ -135,7 +104,7 @@ public:
     {
     }
 private:
-    VADisplay m_vaDisplay;
+
     bool initDisplay()
     {
         unsigned int display = ANDROID_DISPLAY;
@@ -149,30 +118,19 @@ private:
             return false;
         }
 
-        m_nativeDisplay.reset(new NativeDisplay);
-        m_nativeDisplay->type = NATIVE_DISPLAY_VA;
-        m_nativeDisplay->handle = (intptr_t)m_vaDisplay;
         return true;
     }
 
-    bool createVpp()
-    {
-        NativeDisplay nativeDisplay;
-        nativeDisplay.type = NATIVE_DISPLAY_VA;
-        nativeDisplay.handle = (intptr_t)m_vaDisplay;
-        m_vpp.reset(createVideoPostProcess(YAMI_VPP_SCALER), releaseVideoPostProcess);
-        return m_vpp->setNativeDisplay(nativeDisplay) == YAMI_SUCCESS;
-    }
 
     void renderOutputs()
     {
         SharedPtr<VideoFrame> srcFrame;
         do {
-            srcFrame = m_decoder->getOutput();
+            srcFrame = getFrame();
             if (!srcFrame)
                 break;
 
-            if(!displayOneFrame(srcFrame))
+            if(!displayFrame(srcFrame))
                 break;
         } while (1);
     }
@@ -181,7 +139,7 @@ private:
     {
         static sp<SurfaceComposerClient> client = new SurfaceComposerClient();
         //create surface
-        static sp<SurfaceControl> surfaceCtl = client->createSurface(String8("testsurface"), 800, 600, HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL, 0);
+        static sp<SurfaceControl> surfaceCtl = client->createSurface(String8("testsurface"), 800, 600, HAL_PIXEL_FORMAT_NV12, 0);
 
         // configure surface
         SurfaceComposerClient::openGlobalTransaction();
@@ -192,13 +150,13 @@ private:
 
         m_surface = surfaceCtl->getSurface();
 
-        static sp<ANativeWindow> mNativeWindow = m_surface;
+        sp<ANativeWindow> mNativeWindow = m_surface;
         int bufWidth = 640;
         int bufHeight = 480;
         CHECK_EQ(0,
                  native_window_set_usage(
                                          mNativeWindow.get(),
-                                                          GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_OFTEN
+                                         GRALLOC_USAGE_SW_READ_NEVER | GRALLOC_USAGE_SW_WRITE_OFTEN
                                          | GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_EXTERNAL_DISP));
 
         CHECK_EQ(0,
@@ -210,7 +168,9 @@ private:
                                                        mNativeWindow.get(),
                                                        bufWidth,
                                                        bufHeight,
-                                                       HAL_PIXEL_FORMAT_NV12_Y_TILED_INTEL));
+                                                       HAL_PIXEL_FORMAT_NV12));
+
+        CHECK_EQ(0, native_window_api_connect(mNativeWindow.get(), NATIVE_WINDOW_API_MEDIA));
 
         status_t err;
         err = native_window_set_buffer_count(mNativeWindow.get(), 5);
@@ -222,8 +182,21 @@ private:
         return true;
     }
 
-    SharedPtr<VideoFrame> createVaSurface(const ANativeWindowBuffer* buf)
+    SharedPtr<VideoFrame> createVaSurface(ANativeWindowBuffer* buf)
     {
+        SharedPtr<VideoFrame> frame(new VideoFrame);
+        frame->buf = buf;
+
+        ERROR("+++\r\n");
+
+        uint32_t width, height, stride;
+        uint32_t format;
+        CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_DIMENSIONS, (buffer_handle_t)buf->handle, &width, &height));
+        CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_STRIDE, (buffer_handle_t)buf->handle, &stride));
+        CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_FORMAT, (buffer_handle_t)buf->handle, &format));
+        ERROR("%dx%d, %d, format = %d\r\n", (int)width, (int)height, (int)stride, (int)format);
+
+#if 0
         SharedPtr<VideoFrame> frame;
 
         intel_ufo_buffer_details_t info;
@@ -272,51 +245,57 @@ private:
         frame->surface = static_cast<intptr_t>(id);
         frame->crop.width = buf->width;
         frame->crop.height = buf->height;
+#endif
 
         return frame;
     }
 
-    bool displayOneFrame(SharedPtr<VideoFrame>& srcFrame)
+    SharedPtr<VideoFrame> getFrame()
     {
         status_t err;
-        SharedPtr<VideoFrame> dstFrame;
+        SharedPtr<VideoFrame> frame;
         sp<ANativeWindow> mNativeWindow = m_surface;
         ANativeWindowBuffer* buf;
+        ERROR("+wait");
 
         err = native_window_dequeue_buffer_and_wait(mNativeWindow.get(), &buf);
         if (err != 0) {
             fprintf(stderr, "dequeueBuffer failed: %s (%d)\n", strerror(-err), -err);
-            return false;
+            return frame;
         }
+        ERROR("-wait");
 
         std::map< ANativeWindowBuffer*, SharedPtr<VideoFrame> >::const_iterator it;
         it = m_buff.find(buf);
         if (it != m_buff.end()) {
-            dstFrame = it->second;
+            frame = it->second;
         } else {
-            dstFrame = createVaSurface(buf);
-            m_buff.insert(std::pair<ANativeWindowBuffer*, SharedPtr<VideoFrame> >(buf, dstFrame));
+            frame = createVaSurface(buf);
+            m_buff.insert(std::pair<ANativeWindowBuffer*, SharedPtr<VideoFrame> >(buf, frame));
         }
+        return frame;
+    }
 
-        m_vpp->process(srcFrame, dstFrame);
-
-        if (mNativeWindow->queueBuffer(mNativeWindow.get(), buf, -1) != 0) {
+    bool displayFrame(SharedPtr<VideoFrame>& frame)
+    {
+        sp<ANativeWindow> mNativeWindow = m_surface;
+        //ERROR("id = %p", frame->buf);
+        if (mNativeWindow->queueBuffer(mNativeWindow.get(), frame->buf, -1) != 0) {
             fprintf(stderr, "queue buffer to native window failed\n");
             return false;
         }
         return true;
     }
 
-    SharedPtr<NativeDisplay> m_nativeDisplay;
+    VADisplay m_vaDisplay;
 
-    SharedPtr<IVideoDecoder> m_decoder;
-    SharedPtr<DecodeInput> m_input;
+
     int m_width, m_height;
 
     sp<Surface> m_surface;
-    gralloc_module_t* m_pGralloc;
     std::map< ANativeWindowBuffer*, SharedPtr<VideoFrame> > m_buff;
-    SharedPtr<IVideoPostProcess> m_vpp;
+
+    gralloc_module_t* m_pGralloc;
 };
 
 int main(int argc, char** argv)
