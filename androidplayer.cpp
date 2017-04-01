@@ -28,6 +28,7 @@
 #include <ui/GraphicBufferMapper.h>
 
 #include <va/va_android.h>
+#include <va/va_drmcommon.h>
 #include <va/va.h>
 //#include <cros_gralloc_helpers.h>
 
@@ -49,7 +50,7 @@
 using namespace android;
 
 struct VideoFrame {
-//    VASurfaceID surface;
+    VASurfaceID surface;
     ANativeWindowBuffer* buf;
 
 };
@@ -64,7 +65,10 @@ enum {
         GRALLOC_DRM_GET_FORMAT,
         GRALLOC_DRM_GET_DIMENSIONS,
         GRALLOC_DRM_GET_BACKING_STORE,
+	GRALLOC_DRM_GET_DRM_FD,
 };
+
+#define GRALLOC_MODULE_PERFORM_GET_DRM_FD 0x80000002
 
 
 class AndroidPlayer
@@ -182,19 +186,72 @@ private:
         return true;
     }
 
+
     SharedPtr<VideoFrame> createVaSurface(ANativeWindowBuffer* buf)
     {
-        SharedPtr<VideoFrame> frame(new VideoFrame);
-        frame->buf = buf;
+        SharedPtr<VideoFrame> frame;
 
-        ERROR("+++\r\n");
 
         uint32_t width, height, stride;
         uint32_t format;
+        int fd;
         CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_DIMENSIONS, (buffer_handle_t)buf->handle, &width, &height));
         CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_STRIDE, (buffer_handle_t)buf->handle, &stride));
         CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_FORMAT, (buffer_handle_t)buf->handle, &format));
-        ERROR("%dx%d, %d, format = %d\r\n", (int)width, (int)height, (int)stride, (int)format);
+        CHECK_EQ(0, m_pGralloc->perform(m_pGralloc, GRALLOC_DRM_GET_DRM_FD, (buffer_handle_t)buf->handle, &fd));
+        ERROR("%dx%d, %d, format = %d, fd = %d\r\n", (int)width, (int)height, (int)stride, (int)format, fd);
+
+        VASurfaceAttribExternalBuffers external;
+        memset(&external, 0, sizeof(external));
+
+        external.pixel_format = VA_FOURCC_NV12;
+        external.width = width;
+        external.height = height;
+        external.pitches[0] = stride;
+        external.pitches[1] = stride/2;
+        external.offsets[0] = 0;
+        external.offsets[1] = stride * height;
+        external.data_size = stride * height * 3/2;
+        external.num_planes = 2;
+        external.num_buffers = 1;
+        ERROR("%dx%d\n", buf->width, buf->height);
+        for (unsigned int i = 0; i < external.num_planes; i++) {
+            ERROR("i = %d, stride = %d, offset = %d\r\n", i , external.pitches[i], external.offsets[i]);
+        }
+        ERROR("datasize = %d",  external.data_size);
+
+
+        unsigned long handle = (unsigned long)fd;
+        external.buffers = &handle;
+
+
+		VASurfaceAttrib attribs[2];
+        memset(&attribs, 0, sizeof(attribs));
+        attribs[0].flags = VA_SURFACE_ATTRIB_SETTABLE;
+        attribs[0].type = VASurfaceAttribMemoryType;
+        attribs[0].value.type = VAGenericValueTypeInteger;
+        //attribs[0].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_KERNEL_DRM;
+        attribs[0].value.value.i = VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME;
+
+        attribs[1].flags = VA_SURFACE_ATTRIB_SETTABLE;
+        attribs[1].type = VASurfaceAttribExternalBufferDescriptor;
+        attribs[1].value.type = VAGenericValueTypePointer;
+        attribs[1].value.value.p = &external;
+
+        VASurfaceID id;
+        VAStatus vaStatus = vaCreateSurfaces(m_vaDisplay, VA_RT_FORMAT_YUV420,
+                width, height, &id, 1, attribs, 2);
+        if (vaStatus != VA_STATUS_SUCCESS) {
+            ERROR("vaCreateSurface failed, status = %d\n", vaStatus);
+            return frame;
+        }
+        frame.reset(new VideoFrame);
+        frame->buf = buf;
+        frame->surface = id;
+        ERROR("id = %x\r\n", id);
+        return frame;
+
+
 
 #if 0
         SharedPtr<VideoFrame> frame;
